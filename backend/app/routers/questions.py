@@ -187,3 +187,46 @@ async def get_question_sets(
         }
         for qs in question_sets
     ]
+
+
+@router.delete("/{question_id}")
+async def delete_question(
+    question_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a specific question by ID."""
+    
+    result = await db.execute(
+        select(Question).where(Question.id == question_id)
+    )
+    question = result.scalar_one_or_none()
+    
+    if not question:
+        raise HTTPException(status_code=404, detail="문제를 찾을 수 없습니다.")
+    
+    await db.delete(question)
+    await db.commit()
+    
+    return {"message": "문제가 삭제되었습니다.", "id": question_id}
+
+
+@router.delete("/sets/{question_set_id}")
+async def delete_question_set(
+    question_set_id: int,
+    db: AsyncSession = Depends(get_db)
+):
+    """Delete a question set and all its questions."""
+    
+    result = await db.execute(
+        select(QuestionSet).where(QuestionSet.id == question_set_id)
+    )
+    question_set = result.scalar_one_or_none()
+    
+    if not question_set:
+        raise HTTPException(status_code=404, detail="문제 세트를 찾을 수 없습니다.")
+    
+    await db.delete(question_set)
+    await db.commit()
+    
+    return {"message": "문제 세트가 삭제되었습니다.", "id": question_set_id}
+

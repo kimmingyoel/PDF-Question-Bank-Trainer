@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 import random
 
 from app.database import get_db
@@ -14,13 +14,20 @@ router = APIRouter()
 
 class QuizStartRequest(BaseModel):
     """Request to start a quiz."""
-    question_set_id: Optional[int] = None
+    question_set_ids: Optional[List[int]] = None  # Changed to list for multiple sets
     question_type: Optional[str] = None
     shuffle_questions: bool = True
     shuffle_choices: bool = True
     bookmarked_only: bool = False
     frequently_wrong_only: bool = False
-    limit: int = 20
+
+
+class QuizCountRequest(BaseModel):
+    """Request to get question count."""
+    question_set_ids: Optional[List[int]] = None
+    question_type: Optional[str] = None
+    bookmarked_only: bool = False
+    frequently_wrong_only: bool = False
 
 
 class SubmitAnswerRequest(BaseModel):
@@ -28,6 +35,44 @@ class SubmitAnswerRequest(BaseModel):
     question_id: int
     user_answer: str
     time_spent_seconds: Optional[float] = None
+
+
+@router.post("/count")
+async def get_question_count(
+    request: QuizCountRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """Get the count of questions matching the criteria."""
+    
+    query = select(func.count(Question.id))
+    
+    # Filter by question sets
+    if request.question_set_ids and len(request.question_set_ids) > 0:
+        query = query.where(Question.question_set_id.in_(request.question_set_ids))
+    
+    # Filter by question type
+    if request.question_type:
+        query = query.where(Question.type == request.question_type)
+    
+    # Filter by bookmarked only
+    if request.bookmarked_only:
+        bookmarked_subquery = select(Bookmark.question_id)
+        query = query.where(Question.id.in_(bookmarked_subquery))
+    
+    # Filter by frequently wrong only
+    if request.frequently_wrong_only:
+        wrong_subquery = (
+            select(AttemptHistory.question_id)
+            .group_by(AttemptHistory.question_id)
+            .having(func.count(AttemptHistory.id) >= 2)
+            .having(func.avg(AttemptHistory.is_correct.cast(db.bind.dialect.NUMERIC)) < 0.5)
+        )
+        query = query.where(Question.id.in_(wrong_subquery))
+    
+    result = await db.execute(query)
+    count = result.scalar() or 0
+    
+    return {"count": count}
 
 
 @router.post("/start")
@@ -39,9 +84,9 @@ async def start_quiz(
     
     query = select(Question)
     
-    # Filter by question set
-    if request.question_set_id:
-        query = query.where(Question.question_set_id == request.question_set_id)
+    # Filter by question sets (multiple)
+    if request.question_set_ids and len(request.question_set_ids) > 0:
+        query = query.where(Question.question_set_id.in_(request.question_set_ids))
     
     # Filter by question type
     if request.question_type:
@@ -49,34 +94,28 @@ async def start_quiz(
     
     # Filter by bookmarked only
     if request.bookmarked_only:
-        query = query.join(Bookmark).where(Bookmark.question_id == Question.id)
+        bookmarked_subquery = select(Bookmark.question_id)
+        query = query.where(Question.id.in_(bookmarked_subquery))
     
-    # Filter by frequently wrong only (questions with <50% correct rate)
+    # Filter by frequently wrong only
     if request.frequently_wrong_only:
-        # Subquery to calculate correct rate
-        subquery = (
-            select(
-                AttemptHistory.question_id,
-                func.avg(AttemptHistory.is_correct.cast(db.bind.dialect.NUMERIC)).label("correct_rate")
-            )
+        wrong_subquery = (
+            select(AttemptHistory.question_id)
             .group_by(AttemptHistory.question_id)
+            .having(func.count(AttemptHistory.id) >= 2)
             .having(func.avg(AttemptHistory.is_correct.cast(db.bind.dialect.NUMERIC)) < 0.5)
-            .alias()
         )
-        query = query.join(subquery, Question.id == subquery.c.question_id)
+        query = query.where(Question.id.in_(wrong_subquery))
     
     result = await db.execute(query)
     questions = list(result.scalars().all())
     
     if not questions:
-        raise HTTPException(status_code=404, detail="No questions found matching criteria")
+        raise HTTPException(status_code=404, detail="선택한 조건에 맞는 문제가 없습니다.")
     
     # Shuffle questions if requested
     if request.shuffle_questions:
         random.shuffle(questions)
-    
-    # Limit number of questions
-    questions = questions[:request.limit]
     
     # Prepare response
     quiz_questions = []
@@ -115,7 +154,6 @@ async def submit_answer(
 ):
     """Submit an answer and get feedback."""
     
-    # Get question
     result = await db.execute(
         select(Question).where(Question.id == request.question_id)
     )
@@ -124,10 +162,14 @@ async def submit_answer(
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
     
-    # Check if answer is correct
-    is_correct = request.user_answer.strip().lower() == question.answer.strip().lower()
+    # Normalize answers for comparison
+    def normalize(text):
+        import re
+        # Remove all whitespace and punctuation
+        return re.sub(r'[\s\.,\?!]', '', text).lower()
+
+    is_correct = normalize(request.user_answer) == normalize(question.answer)
     
-    # Record attempt
     attempt = AttemptHistory(
         question_id=request.question_id,
         is_correct=is_correct,
@@ -181,7 +223,6 @@ async def get_frequently_wrong_questions(
 ):
     """Get questions with low correct rate."""
     
-    # Subquery to calculate correct rate per question
     subquery = (
         select(
             AttemptHistory.question_id,
@@ -189,7 +230,7 @@ async def get_frequently_wrong_questions(
             func.count(AttemptHistory.id).label("attempt_count")
         )
         .group_by(AttemptHistory.question_id)
-        .having(func.count(AttemptHistory.id) >= 2)  # At least 2 attempts
+        .having(func.count(AttemptHistory.id) >= 2)
         .having(func.avg(AttemptHistory.is_correct.cast(db.bind.dialect.NUMERIC)) < threshold)
         .alias()
     )

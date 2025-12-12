@@ -41,18 +41,31 @@ export const questionsAPI = {
 
     getQuestionSets: () =>
         apiClient.get('/api/questions/sets/'),
+
+    deleteQuestion: (id: number) =>
+        apiClient.delete(`/api/questions/${id}`),
+
+    deleteQuestionSet: (id: number) =>
+        apiClient.delete(`/api/questions/sets/${id}`),
 };
 
 // Quiz API
 export const quizAPI = {
+    getQuestionCount: (data: {
+        question_set_ids?: number[];
+        question_type?: string;
+        bookmarked_only?: boolean;
+        frequently_wrong_only?: boolean;
+    }) =>
+        apiClient.post('/api/quiz/count', data),
+
     startQuiz: (data: {
-        question_set_id?: number;
+        question_set_ids?: number[];
         question_type?: string;
         shuffle_questions?: boolean;
         shuffle_choices?: boolean;
         bookmarked_only?: boolean;
         frequently_wrong_only?: boolean;
-        limit?: number;
     }) =>
         apiClient.post('/api/quiz/start', data),
 
